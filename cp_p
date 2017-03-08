@@ -1,0 +1,188 @@
+#!/bin/bash
+###########
+
+RED='\033[0;31m'
+PURPLE='\033[0;35m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+usage() {
+cat <<EOF
+Usage: cp_p [ OPTIONS ] file1 [ file2 file3 ... ] [ DEST_DIR ]
+
+Options:
+  -d DEST_DIR     destination dir (if -d is set, then last argument is copied)
+  -f              force overwrite
+  -n              not overwrite
+  -m              move mode (delete source after copied)
+
+EOF
+
+exit 1
+}
+
+_fullpath() {
+  cd "$1"
+  echo "$PWD"
+}
+
+_pv_copy() {
+# pv name, to show during copy
+  local _filename="${1##*/}"
+  [[ "${#_filename}" -ge 24 ]] && pv_name="${_filename:0:11} ... ${_filename: -8}" || pv_name="$_filename"
+# if dest file exists, delete it
+  [ -f "$2" ] && rm "$2"
+# create an empty file with original attributes
+  cp -p --attributes-only "$1" "$2"
+# actual copy data
+  pv -ae --progress -N "$pv_name" "$1" >"$2"
+# set modification file of original file
+  touch -d "$(date -R -r "$1")" "$2"
+}
+
+_echo_exists() { echo "\"$1\" exists." ; }
+_echo_not_exists() { echo "\"$1\" doesn't exist." ; }
+_file_exists() {
+# if destination file exists and option -f not set
+  if [ -f "$2" ] && [ ! "$force" = 1 ] ; then
+# if option -n then skip asking
+    if [ "$not_overwrite" ] ; then
+      SKIP=1
+    else
+# if option -n not set
+      _echo_exists "$2"
+      echo -n "Overwrite? (Yes|No): "
+      read -s -n1 _CHOOSE
+      case $_CHOOSE in
+        y|Y) _GO=1
+          echo "Yes" ;;
+        *) _GO=1 SKIP=1
+          echo "No" ;;
+      esac
+      unset _GO
+    fi
+  fi
+
+  if [ ! "$SKIP" = 1 ] ; then
+    if [ "$move" ] ; then
+      local _fs1="$(stat --printf "%m" "$1")"
+      local _fs2="$(stat --printf "%m" "$(echo $2 | sed -r 's:/[^/]*$::')")"
+      if [ "$_fs1" = "$_fs2" ] ; then
+        mv -v "$1" "$2"
+      else
+        _pv_copy "$1" "$2" && rm -v "$1"
+      fi
+    else
+      _pv_copy "$1" "$2"
+    fi
+  else
+    echo "-- Skip $1"
+  fi
+}
+
+while getopts ":hd:fnm" opt; do
+  case "$opt" in
+    h) usage ;;
+    d) dest_dir="$OPTARG" ;;
+    f) force=1 ;;
+    n) not_overwrite=1 ;;
+    m) move=1
+      echo -e "${RED}WARNING: Operating in \"move\" mode. Source file will be moved/deleted.${NC}" ;;
+    \?) echo -e "${YELLOW}ERROR: unknown option \"$OPTARG\"${NC}"
+      usage
+      exit 1;;
+  esac
+done
+
+if [ "$force" ] && [ "$not_overwrite" ] ; then
+  echo "Options -f and -n are mutually exclusive."
+  exit 0
+fi
+
+# Prende tutti gli argomenti non-opt come input (cioè tutti
+# gli argomenti passati per ultimi, anche tramite wildcard).
+# Takes all non-opt arguments (all last arguments, including
+# wildcards).
+shift $(( OPTIND - 1 ))
+inputs=("${@}")
+
+#if [ ! "$dest_dir" ] ; then
+#  echo -e "${YELLOW}ERROR: Missing mandatory option -d DEST_DIR...${NC}"
+#  exit 1
+#else
+# remove trailing slash from destination dir
+#  dest_dir="${dest_dir%/}"
+#fi
+if [ ! "$dest_dir" ] && [ ${#inputs[@]} -gt 1 ] ;then
+  dest_dir="${inputs[$((${#inputs[@]}-1))]}"
+  unset inputs[${#inputs[@]}-1]
+#  inputs_length=${#inputs[@]}
+elif [ ${#inputs[@]} -eq 1 ] ;then
+  unset inputs[${#inputs[@]}-1]
+fi
+[ ${#inputs[@]} -eq 0 ] && usage && exit 0
+
+if [ ! -d "$dest_dir" ] ; then
+  if [ -e "$dest_dir" ] ;then
+    echo -e "${RED}ERROR: \"$dest_dir\" exists and is not a directory.\nExit...${NC}"
+    exit 1
+  else
+    _echo_not_exists "$dest_dir"
+  fi
+  while [[ ! $_GO == 1 ]] ; do
+    echo -n "Mkdir \"$dest_dir\"? (Yes|No): "
+    read -s -n1 _CHOOSE
+    case $_CHOOSE in
+      y|Y) _GO=1
+        mkdir -p "$dest_dir" && echo "Yes" || exit 0 ;;
+      n|N) echo "No"
+        exit 1 ;;
+      *) echo "\"y\" or \"n\"..." ;;
+    esac
+  done
+  unset _GO
+fi
+dest_fullpath="$(_fullpath "$dest_dir")"
+
+# Calcola la dimensione totale dei file da copiare.
+# Calculate total size of files to be copied.
+sum_size="$(du -hc "${inputs[@]}" | tail -n1 | cut -f1)"
+echo "Copying ${#inputs[@]} files/dirs, total size $sum_size..."
+
+list_of_files=() recursive_dirs=()
+for i in "${inputs[@]}" ; do
+  if [ -f "$i" ] ; then
+    list_of_files+=("$i")
+  elif [ -d "$i" ] ; then
+    while IFS= read -d $'\0' -r line ; do
+      recursive_dirs+=("${line%/}")
+    done < <(find "$i" -type d -print0)
+  fi
+done
+
+# catch Ctrl-C signal to do some custom command
+trap '{ echo -e "\n\033[00;33mINT signal from user. Bye bye...\033[0m"; exit 1; }' INT
+
+for file in "${list_of_files[@]}" ; do
+  if [ -f "$file" ] ; then
+    new_file="$dest_dir/${file##*/}"
+    _file_exists "$file" "$new_file"
+  fi
+done
+
+for current_dir in "${recursive_dirs[@]}" ; do
+#  current_fullpath="$(_fullpath "$current_dir")"
+  new_dir="$dest_dir/$(echo $current_dir | sed -r 's/(\.\.?\/)*//;s/^\///;s:/$::')"
+  echo +++ "$new_dir"
+  mkdir -p "$new_dir"
+  for file in "$current_dir"/* ; do
+    if [ -f "$file" ] ; then
+      new_file="$new_dir/${file##*/}"
+      _file_exists "$file" "$new_file"
+    fi
+  done
+done
+
+# restore normal Ctrl-C behavior
+trap - INT
+
