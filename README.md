@@ -1,2 +1,2 @@
 # useful-scripts
-Self-made useful scripts for linux, mainly in bash.
+Some self-made useful scripts for linux, mainly in bash.
